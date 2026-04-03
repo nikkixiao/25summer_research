@@ -1,0 +1,578 @@
+---
+title: "STANCE_breast_cancer"
+author: "Nikki Xiao"
+date: "2025-10-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## STANCE
+
+load in data
+
+```{r}
+library(SeuratObject)
+library(dplyr)
+library(Seurat)
+#library(Matrix)
+# load in data
+load(paste0("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/breast_cancer_visium_img_updated.rdata"))
+raw_counts <- GetAssayData(visium_data, assay = "RNA", slot = "counts")
+
+# Set RNA as default assay
+DefaultAssay(visium_data) <- "RNA"
+
+# Basic information
+print(visium_data)
+print(paste("Number of spots:", ncol(visium_data)))
+print(paste("Total features:", nrow(visium_data)))
+
+# View available assays
+print("Available assays:")
+print(Assays(visium_data))
+
+# Summary
+print("=== Visium Data Summary ===")
+print(paste("Total spots:", ncol(visium_data)))
+print(paste("RNA features:", nrow(visium_data[["RNA"]])))
+```
+
+```{r}
+# installed STANCE
+library(STANCE)
+#library(Matrix)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+```
+
+### **Load in data**
+
+```{r}
+library(Seurat)
+# load in data
+load(paste0("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/breast_cancer_visium_img_updated.rdata"))
+
+raw_counts <- GetAssayData(visium_data, assay = "RNA", slot = "counts")
+DefaultAssay(visium_data) <- "RNA"
+
+print("=== Visium Data Summary ===")
+print(paste("Total spots:", ncol(visium_data)))
+print(paste("RNA features:", nrow(visium_data[["RNA"]])))
+
+visium_data$nCount_RNA[1:5]
+```
+
+```{r}
+counts_visium <- raw_counts # RNA: genes x spots
+
+img <- Images(visium_data)[1]
+coords_df <- GetTissueCoordinates(visium_data, image = img)
+rownames(coords_df) <- coords_df$cell
+pos_mat <- as.matrix(coords_df[, c("x", "y")])
+colnames(pos_mat) <- c("x", "y")
+
+```
+
+```{r}
+# load CARD result
+load("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/CARD_result_w_Wu2021.rdata")
+
+new_coord <- CARD_obj@spatial_location
+colnames(new_coord) <- c("y", "x")
+
+proportion_matrix <- CARD_obj@Proportion_CARD
+
+# Combine the two columns
+tumor_epithelial_cells <- proportion_matrix[, "Normal Epithelial"] + proportion_matrix[, "Cancer Epithelial"]
+
+# Remove the original columns
+proportion_matrix <- proportion_matrix[, !colnames(proportion_matrix) %in% c("Normal Epithelial","Cancer Epithelial")]
+
+# Add the combined column
+proportion_matrix <- cbind(proportion_matrix, "Tumor or Normal Epithelial" = tumor_epithelial_cells)
+
+# subset to the 3 targets
+targets <- c("T-cells","B-cells","Tumor or Normal Epithelial")
+
+prop3 <- proportion_matrix[, targets, drop = FALSE]
+
+# Align rows to Visium object
+common_spots <- intersect(rownames(prop3), colnames(visium_data))
+prop3 <- prop3[common_spots, , drop = FALSE]
+visium_data <- visium_data[, common_spots]
+
+```
+
+```{r}
+prop3_tcells <- prop3[ , "T-cells", drop = FALSE]
+head(prop3_tcells)
+
+prop3_tcells <- as.matrix(prop3[, "T-cells", drop = FALSE])
+colnames(prop3_tcells) <- "T-cells"
+
+common <- Reduce(intersect, list(colnames(counts_visium),
+                                 rownames(prop3_tcells),
+                                 rownames(pos_mat)))
+
+counts_visium2  <- counts_visium[, common, drop = FALSE]
+pos_mat2        <- pos_mat[common, , drop = FALSE]
+prop3_tcells2   <- prop3_tcells[common, , drop = FALSE]
+```
+
+```{r}
+# create stance obj
+obj_st <- creatSTANCEobject(counts = counts_visium,
+                         pos = pos_mat,
+                         prop = prop3,
+                         covariates = NULL)
+save(obj_st, file = "stance_object.rdata")
+```
+
+```{r}
+
+# 1) Coerce counts to a plain numeric matrix
+counts_mat <- as.matrix(counts_visium)
+storage.mode(counts_mat) <- "double"  # ensure numeric
+
+# (quick sanity)
+is.matrix(counts_mat); is.numeric(counts_mat)
+# --- Quick STANCE preflight checks ---
+list(
+  # types & shapes
+  prop_is_matrix      = is.matrix(prop_t),
+  prop_nrow_ncol      = dim(prop_t),
+  prop_colnames       = colnames(prop_t),
+  prop_range          = range(prop_t, na.rm = TRUE),
+  prop_has_na         = anyNA(prop_t),
+
+  counts_is_matrix    = is.matrix(counts_mat),
+  counts_mode_numeric = is.numeric(counts_mat),
+  counts_dim          = dim(counts_mat),
+
+  pos_is_matrix       = is.matrix(pos_mat),
+  pos_dim             = dim(pos_mat),
+  pos_colnames        = colnames(pos_mat),
+
+  # alignment (these should be TRUE)
+  align_prop_counts   = identical(rownames(prop_t),  colnames(counts_mat)),
+  align_pos_counts    = identical(rownames(pos_mat), colnames(counts_mat)),
+
+  # intersection size (should equal ncol(counts) if aligned)
+  common_len          = length(Reduce(intersect, list(
+                           colnames(counts_mat),
+                           rownames(pos_mat),
+                           rownames(prop_t))))
+)
+
+```
+
+```{r}
+
+#common <- Reduce(intersect, list(colnames(counts_visium), rownames(pos_mat), rownames(prop_t)))
+
+obj_st <- creatSTANCEobject(
+  counts = counts_mat,   # <- use the coerced numeric matrix
+  pos    = pos_mat,
+  prop   = prop_t,       # 1-column matrix, colname "T-cells"
+  covariates = NULL
+)
+```
+
+```{r}
+## 0) Counts as plain numeric matrix
+counts_mat <- as.matrix(counts_visium)
+storage.mode(counts_mat) <- "double"
+
+## 1) Build a 2-col composition: T-cells and "Other" = 1 - T-cells
+tvec <- prop3[, "T-cells"]
+other <- pmax(0, 1 - tvec)  # keep in [0,1]; OK even if original sums ≈1
+
+prop_two <- cbind("T-cells" = tvec, "Other" = other)
+rownames(prop_two) <- rownames(prop3)  # spots
+
+## 2) Align spots (safe)
+common <- Reduce(intersect, list(colnames(counts_mat), rownames(pos_mat), rownames(prop_two)))
+counts_m <- counts_mat[, common, drop = FALSE]
+pos_m    <- as.matrix(pos_mat[common, , drop = FALSE])
+prop_m   <- prop_two[common, , drop = FALSE]
+
+## 3) Create STANCE object (now prop is guaranteed a matrix with >=2 cols)
+obj_st <- creatSTANCEobject(
+  counts = counts_m,
+  pos    = pos_m,
+  prop   = prop_m,
+  covariates = NULL
+)
+
+```
+
+Preprocess the input data
+
+```{r}
+#load("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/stance_object.rdata")
+mySTANCE <- data_preprocess(object = obj_st, 
+                            gene.threshold = 0.05, spot.threshold = 10,
+                            normalized = FALSE)
+```
+
+build gaussian kernel
+
+```{r}
+mySTANCE <- build_kernelMatrix(object = mySTANCE)
+```
+
+## **Perform STANCE overall test for utSVGs (including both SVGs & ctSVGs)**
+
+```{r}
+mySTANCE <- runTest1(object = mySTANCE,
+                     correction = F, pv.adjust = "BY")
+```
+
+```{r}
+head(mySTANCE@Test_1)
+```
+
+## **Perform STANCE individual test**
+
+```{r}
+genes.list <- rownames(mySTANCE@gene_expression)
+# List for utSVGs detected by STANCE overall test
+utSVG.list <- genes.list[mySTANCE@Test_1$p_value_adj < 0.05]
+utSVG.list[171:180]
+```
+
+```{r}
+
+mySTANCE <- runTest2(object = mySTANCE, 
+                     Genes_to_test = utSVG.list[1:200], 
+                     Cell_types_to_test = "T-cells", 
+                     correction = F, 
+                     ncores = 1)
+```
+
+```{r}
+save(mySTANCE, file = "1-200_STANCE_Test2")
+```
+
+```{r}
+mySTANCE <- runTest2(object = mySTANCE, 
+                     Genes_to_test = utSVG.list[201:300], 
+                     Cell_types_to_test = "T-cells", 
+                     correction = F, 
+                     ncores = 1)
+```
+
+```{r}
+save(mySTANCE, file = "201-300_STANCE_Test2")
+```
+
+```{r}
+mySTANCE <- runTest2(object = mySTANCE, 
+                     Genes_to_test = utSVG.list[301:400], 
+                     Cell_types_to_test = "T-cells", 
+                     correction = F, 
+                     ncores = 1)
+```
+
+```{r}
+save(mySTANCE, file = "301-400_STANCE_Test2")
+```
+
+```{r}
+mySTANCE <- runTest2(object = mySTANCE, 
+                     Genes_to_test = utSVG.list[401:500], 
+                     Cell_types_to_test = "T-cells", 
+                     correction = F, 
+                     ncores = 1)
+```
+
+```{r}
+save(mySTANCE, file = "401-500_STANCE_Test2")
+```
+
+```{r}
+# Individual testing results for cell type "T-cells"
+head(mySTANCE@Test_2[["T-cells"]])
+```
+
+## Merge results, should be ready to visualize and select top genes
+
+load in Test2 results
+
+```{r}
+load("1-200_STANCE_Test2")
+p1 <- mySTANCE
+load("201-300_STANCE_Test2")
+p2 <- mySTANCE
+load("301-400_STANCE_Test2")
+p3 <- mySTANCE
+load("401-500_STANCE_Test2")
+p4 <- mySTANCE
+
+stance_obj <- list(p1, p2, p3, p4)
+
+```
+
+merge results
+
+```{r}
+celltypes <- names(stance_obj[[1]]@Test_2) # "T-cells"
+
+merged_Test2 <- lapply(celltypes, function(ct) {
+  # Extract and combine for this cell type
+  dfs <- lapply(stance_obj, function(obj) obj@Test_2[[ct]])
+  df_all <- do.call(rbind, dfs)
+  df_all <- df_all[!duplicated(rownames(df_all)), , drop = FALSE]
+  df_all <- df_all[order(df_all$p_value), , drop = FALSE]
+  return(df_all)
+})
+names(merged_Test2) <- celltypes
+
+# Attach back to one object (e.g., the first)
+merged_obj <- stance_obj[[1]]
+merged_obj@Test_2 <- merged_Test2
+```
+
+Add adjusted p-value
+
+```{r}
+# Apply FDR correction (Benjamini–Hochberg) to each cell type
+merged_Test2 <- lapply(merged_Test2, function(df) {
+  # Compute adjusted p-values (BH FDR)
+  df$p_value_adj <- p.adjust(df$p_value, method = "BH")
+  
+  # Sort by adjusted p-value
+  df <- df[order(df$p_value_adj), , drop = FALSE]
+  return(df)
+})
+
+# Re-attach to your merged STANCE object
+merged_obj@Test_2 <- merged_Test2
+
+
+
+```
+
+```{r}
+# loop through each cell type and append an adjusted p-value column
+for (ct in names(merged_obj@Test_2)) {
+  df <- merged_obj@Test_2[[ct]]                # extract existing table
+  df$p_value_adj <- p.adjust(df$p_value, method = "BH")  # add FDR-adjusted p-value
+  merged_obj@Test_2[[ct]] <- df                # put it back
+}
+```
+
+```{r}
+head(merged_obj@Test_2$`T-cells`)
+```
+
+```{r}
+top_T <- head(rownames(merged_obj@Test_2$`T-cells`), 10)
+top_T
+```
+
+Volcano Plot
+
+```{r}
+# Loading relevant libraries 
+library(conflicted)
+library(dplyr)
+library(tidyverse) # includes ggplot2, for data visualisation. dplyr, for data manipulation.
+library(RColorBrewer) # for a colourful plot
+library(ggrepel) # for nice annotations
+```
+
+```{r}
+for (ct in names(merged_obj@Test_2)) {
+  df <- merged_obj@Test_2[[ct]]
+  
+  # add -log10 of adjusted p-value
+  df$neglog10_padj <- -log10(df$p_value_adj)
+
+  # put it back
+  merged_obj@Test_2[[ct]] <- df
+}
+head(df)
+```
+
+```{r}
+
+```
+
+```{r}
+sig_color <- "firebrick3"
+up_color <- "steelblue3"
+down_color <- "darkgrey"
+cutoff <- 0.5
+alpha <- 0.05
+
+df <- df %>%
+  mutate(
+    sig = case_when(
+      p_value < alpha & statistic > cutoff  ~ "Up",
+      p_value < alpha & statistic < cutoff ~ "Down",
+      TRUE                                     ~ "NS"  # not significant
+    )
+  )
+
+top_label <- df %>%
+  arrange(p_value_adj) %>%
+  slice_head(n = 10) %>%
+  mutate(Gene = rownames(.)) 
+
+p1 <- ggplot(df, aes(x = statistic, y = -log10(p_value))) +
+  geom_point(aes(color = sig), alpha = 0.8, size = 1.5) +
+  scale_color_manual(values = c("Up" = "firebrick3",
+                                "Down" = "steelblue3",
+                                "NS" = "grey70")) +
+  geom_vline(xintercept = c(cutoff, cutoff),
+             linetype = "dashed", color = "grey40") +
+  geom_hline(yintercept = -log10(alpha),
+             linetype = "dashed", color = "grey40") +
+  geom_text_repel(
+    data = top_label,
+    aes(label = Gene),
+    size = 3,
+    color = "black",
+    box.padding = 0.4,
+    segment.color = "grey60",
+    max.overlaps = Inf
+  ) +
+  labs(
+    title = paste0("STANCE Volcano Plot -", ct),
+    x = "Spatial effect (Test_2 statistic)",
+    y = expression(-log[10]("FDR (BH)"))
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(linetype = "dotted", color = "grey85")
+  )
+ggsave("STANCE_Tcells_volcano_plot.png", p1, width = 10, height = 8, dpi = 300)
+```
+
+```{r}
+
+```
+
+visualization venn diagram
+
+```{r}
+library(CELINA)
+library(SeuratObject)
+library(sp)
+load("CELINA_result.rdata", verbose = TRUE)
+
+```
+
+```{r}
+names_in_file <- load("CELINA_result.rdata")
+names_in_file
+```
+
+```{r}
+class(Obj@result)
+str(Obj@result, max.level = 1)
+genes <- Obj@genes_list[["T-cells"]]         # grab gene names
+pvals <- Obj@result[["T-cells"]]$CombinedPvals  # final combined p-values
+adj_p  <- p.adjust(pvals, method = "BH")     # BH-adjusted
+
+celina_Tcells <- data.frame(gene = genes, p_adj = adj_p)
+celina_Tcells <- celina_Tcells[order(celina_Tcells$p_adj), ]  # sort smallest first
+
+head(celina_Tcells, 20)   # show top 20
+sig_celina <- subset(celina_Tcells, p_adj < 0.05)
+celina_top200 <- head(sig_celina, 200)
+saveRDS(celina_top200, file = "CELINA_Tcells_top200.rds")
+# celina_top200 <- readRDS("CELINA_Tcells_top200.rds")
+
+```
+
+moran's I
+
+```{r}
+
+library(Seurat)
+library(SeuratObject)
+# library(Matrix)
+# load in data
+load(paste0("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/breast_cancer_visium_img_updated.rdata"))
+raw_counts <- GetAssayData(visium_data, assay = "RNA", slot = "counts")
+
+# top features using RNA
+DefaultAssay(visium_data) <- "RNA"
+
+visium_data <- NormalizeData(visium_data, verbose = FALSE)
+visium_data <- FindVariableFeatures(visium_data, verbose = FALSE)
+
+visium_data <- FindSpatiallyVariableFeatures(
+  visium_data,
+  assay = "RNA",
+  slot = "data",                         # use "data" for RNA
+  features = VariableFeatures(visium_data)[1:1000],
+  selection.method = "moransi",
+  x.cuts = 100, y.cuts = 100
+)
+
+
+```
+
+```{r}
+moransi_top200 <- head(SpatiallyVariableFeatures(visium_data, method = "moransi"), 200)
+moransi_top200
+```
+
+```{r}
+# stance top 200
+stance_top200 <- head(df, 200)
+# stance_top200
+```
+
+STANCE test 1 top 200 genes
+
+```{r}
+df <- mySTANCE@Test_1  # change to your cell type if different
+# head(df)
+# stance_top200 <- head(df[order(df$p_value), ], 800)
+stance_top200 <- df[order(df$p_value_adj, -df$statistic), ][1:200, ]
+stance_top200
+summary(df$p_value_adj)
+```
+
+Venn
+
+```{r}
+library(ggvenn)
+stance_genes_top200 <- rownames(stance_top200)
+
+sets <- list(
+  CELINA = as.character(celina_top200$gene),
+  STANCE = as.character(stance_genes_top200),
+  MORANSI  = as.character(moransi_top200)
+)
+
+library(VennDiagram)
+vp <- venn.diagram(
+  x = sets,
+  filename = NULL,                      # <- draw to screen instead of file
+  fill = c("#A6CEE3", "#B2DF8A", "#FB9A99"),
+  alpha = 0.6, cex = 1.2, cat.cex = 1.2,
+  
+  cat.pos  = c(330, 30, 180),            # CELINA left, STANCE right, MORAN bottom
+  cat.dist = c(0.05, 0.05, 0.05),       # push labels slightly away from circles
+  cat.just = list(c(0.5,0.5), c(0.5,0.5), c(0.5,0.5))
+)
+grid.newpage(); grid.draw(vp)
+png("NEW_venn_top200.png", width = 1800, height = 1600, res = 300)
+grid.draw(vp)
+dev.off()
+```
+
+```{r}
+
+```

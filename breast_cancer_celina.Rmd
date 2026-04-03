@@ -1,0 +1,218 @@
+---
+title: "Untitled"
+author: "Nikki Xiao"
+date: "2025-07-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load in data
+
+```{r}
+library(Seurat)
+library(Matrix)
+# load in data
+load(paste0("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/breast_cancer_visium_img_updated.rdata"))
+raw_counts <- GetAssayData(visium_data, assay = "RNA", slot = "counts")
+
+# Set RNA as default assay
+DefaultAssay(visium_data) <- "RNA"
+
+# Basic information
+print(visium_data)
+print(paste("Number of spots:", ncol(visium_data)))
+print(paste("Total features:", nrow(visium_data)))
+
+# View available assays
+print("Available assays:")
+print(Assays(visium_data))
+
+# Summary
+print("=== Visium Data Summary ===")
+print(paste("Total spots:", ncol(visium_data)))
+print(paste("RNA features:", nrow(visium_data[["RNA"]])))
+
+
+
+```
+
+```{r}
+raw_counts <- GetAssayData(visium_data, assay = "Protein", slot = "counts")
+
+# Set Protein as default assay
+DefaultAssay(visium_data) <- "Protein"
+
+# Basic information
+print(visium_data)
+print(paste("Number of spots:", ncol(visium_data)))
+print(paste("Total features:", nrow(visium_data)))
+
+# View available assays
+print("Available assays:")
+print(Assays(visium_data))
+
+# Summary
+print("=== Visium Data Summary ===")
+print(paste("Total spots:", ncol(visium_data)))
+print(paste("Protein features:", nrow(visium_data[["Protein"]])))
+```
+
+```{r}
+# load CARD result
+load("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/CARD_result_w_Wu2021.rdata")
+
+```
+
+```{r}
+# Read genes (features)
+genes <- read.table("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/Wu_etal_2021_BRCA_scRNASeq/count_matrix_genes.tsv", header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+colnames(genes) <- c("gene_name")
+
+# Read barcodes (cell IDs)
+barcodes <- read.table("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/Wu_etal_2021_BRCA_scRNASeq/count_matrix_barcodes.tsv", 
+                       header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+colnames(barcodes) <- "barcode"
+
+# Read sparse matrix
+counts_matrix <- readMM("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/Wu_etal_2021_BRCA_scRNASeq/count_matrix_sparse.mtx")
+
+# Set row and column names
+rownames(counts_matrix) <- genes$gene_name
+colnames(counts_matrix) <- barcodes$barcode
+
+# Create Seurat object
+wu_data <- CreateSeuratObject(counts = counts_matrix, assay = "RNA")
+
+# Read metadata (including cell type information)
+metadata <- read.csv("/Users/nikkixiaomengqi/Desktop/25_Summer_Research/Wu_etal_2021_BRCA_scRNASeq/metadata.csv", 
+                     header = TRUE, row.names = 1)
+
+# Add metadata to Seurat object
+wu_data <- AddMetaData(wu_data, metadata)
+
+# Basic information
+print(wu_data)
+print(paste("Number of cells:", ncol(wu_data)))
+print(paste("Number of genes:", nrow(wu_data)))
+
+# Check gene names
+print("Gene names (first 10):")
+print(head(rownames(wu_data), 10))
+
+# Check available metadata
+unique(wu_data$celltype_major)
+
+```
+
+```{r}
+#Cellular deconvolution results from CARD
+library(ggplot2)
+new_coord <- CARD_obj@spatial_location
+colnames(new_coord) <- c("y", "x")
+
+proportion_matrix <- CARD_obj@Proportion_CARD
+
+# Combine the two columns
+tumor_epithelial_cells <- proportion_matrix[, "Normal Epithelial"] + proportion_matrix[, "Cancer Epithelial"]
+
+# Remove the original columns
+proportion_matrix <- proportion_matrix[, !colnames(proportion_matrix) %in% c("Normal Epithelial","Cancer Epithelial")]
+
+# Add the combined column
+proportion_matrix <- cbind(proportion_matrix, "Tumor or Normal Epithelial" = tumor_epithelial_cells)
+
+# subset to the 3 targets
+targets <- c("T-cells","B-cells","Tumor or Normal Epithelial")
+
+prop3 <- proportion_matrix[, targets, drop = FALSE]
+
+# Align rows to Visium object
+common_spots <- intersect(rownames(prop3), colnames(visium_data))
+prop3 <- prop3[common_spots, , drop = FALSE]
+visium_data <- visium_data[, common_spots]
+
+# visualization CARD
+colors_major <- c("T-cells" = "#377EB8", "B-cells" = "#4DAF4A", "Tumor or Normal Epithelial" = "#FFD92F")
+p1 <- CARD.visualize.pie(
+  proportion = prop3,
+  spatial_location = new_coord[rownames(prop3), , drop = FALSE],
+  colors = colors_major,
+  radius = 0.52
+)
+print(p1)
+ggsave("viz_major_pie.png", p1, width = 8, height = 7, dpi = 300)
+
+p_prop <- CARD.visualize.prop(
+  proportion = prop3,
+  spatial_location = new_coord[rownames(prop3), , drop = FALSE],
+  ct.visualize = colnames(prop3),
+  colors = c("lightblue","lightyellow","red"),
+  NumCols = 2,
+  pointSize = 1.0
+)
+print(p_prop)
+ggsave("viz_major_prop.png", p_prop, width = 10, height = 8, dpi = 300)
+ggsave("all cell type", )
+```
+
+## Create Celina object
+
+```{r}
+library(CELINA)
+library(SeuratObject)
+library(dplyr)
+
+common_spots <- intersect(rownames(prop3), colnames(visium_data))
+
+visium_use   <- visium_data[, common_spots]
+
+expr_use <- as.matrix(GetAssayData(visium_use, slot = "counts"))
+
+
+# create CELINA object
+Obj = Create_Celina_Object(celltype_mat = t(CARD_obj@Proportion_CARD[common_spots, ]), 
+                              gene_expression_mat = expr_use, 
+                              location = as.matrix(visium_use@meta.data[common_spots, c("x","y")]),
+                              covariates = NULL,
+                              project = "Breast Cancer")
+
+```
+
+```{r}
+Obj = preprocess_input(Obj, 
+                       # Celina object
+                       cell_types_to_test = colnames(CARD_obj@Proportion_CARD),  
+                       # a vector of cell types to be used for testing 
+                       scRNA_count = as.matrix(counts_matrix), 
+                       # a gene x cell expression matrix of reference scRNA-seq data
+                       sc_cell_type_labels = wu_data$celltype_major,
+                       # a vector of cell type labels for each cell in scRNA_count
+                       threshold = 5e-5)
+print(names(Obj@genes_list))
+```
+
+```{r}
+Obj = Calculate_Kernel(Obj, approximation = FALSE)
+```
+
+```{r}
+rm(counts_matrix)
+rm(CARD_obj)
+rm(wu_data)
+rm(visium_data)
+Obj = Testing_interaction_all(Obj,celltype_to_test = "T-cells", num_cores=1)
+```
+
+```{r}
+save(Obj, file = "CELINA_result.rdata")
+```
+
+```{r}
+ Obj@result$`T-cells`$adjust_pval = p.adjust((Obj@result$`T-cells`$adjust_pval), method = p.adjust.methods)
+ #Obj@result$`T-cells`$adjust_pval = p.adjust(Obj@result$`T-cells`$CombinedPvals)
+ #Obj@result$`T-cells`$adjust_pval = p.adjust(Obj@result$`T-cells`$CombinedPvals)
+ 
+```
